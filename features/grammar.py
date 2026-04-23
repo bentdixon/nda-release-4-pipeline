@@ -169,13 +169,13 @@ def save_tags(
             label = 'pronoun_possession'
         labels_renamed.append(label)
 
-    # Exclude: num_sent, word_freq, file_name
-    non_feature_labels = {'num_sent', 'word_freq', 'file_name'}
+    # Exclude: num_sent, num_words, word_freq, file_name
+    non_feature_labels = {'num_sent', 'num_words', 'word_freq', 'file_name'}
 
     header = [
                  'network', 'language', 'src_subject_id', 'interview_type',
                  'day', 'interview_number', 'transcript_speaker_label', 'speaker_role'
-             ] + labels_renamed[:-3] + ['num_sent', 'word_freq', 'file_name.txt']
+             ] + labels_renamed[:-4] + ['num_sent', 'num_words', 'word_freq', 'file_name.txt']
 
     # Ensure parent directories exist
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -199,18 +199,19 @@ def save_tags(
             except KeyError:
                 language_name = language_code
 
-            # Build row values (excluding the last 3: num_sent, word_freq, file_name)
-            row_values = [str(features[label]) for label in labels_original[:-3]]
+            # Build row values (excluding the last 4: num_sent, num_words, word_freq, file_name)
+            row_values = [str(features[label]) for label in labels_original[:-4]]
 
             # Get the trailing statistics
             num_sent = str(features['num_sent'])
+            num_words = str(features['num_words'])
             word_freq = str(features['word_freq'])
             file_name = str(features['file_name'])
 
             row = [
                       site, language_name, patient_id, transcript_type,
                       day, session, '', speaker_role_output  # Empty string for transcript_speaker_label placeholder
-                  ] + row_values + [num_sent, word_freq, file_name]
+                  ] + row_values + [num_sent, num_words, word_freq, file_name]
 
             outfile.write('\t'.join(row) + '\n')
 
@@ -321,6 +322,7 @@ def process_transcript_lines(
 
         freq_statistics = {
             'num_sent': num_sentences,
+            'num_words': num_words,
             'word_freq': mean_word_freq,
             'file_name': str(transcript.filename)
         }
@@ -388,7 +390,7 @@ def save_tags_combined(
     header = [
                  'network', 'language', 'src_subject_id', 'interview_type',
                  'day', 'interview_number', 'transcript_speaker_label', 'speaker_role'
-             ] + labels_renamed[:-3] + ['num_sent', 'word_freq', 'file_name.txt']
+             ] + labels_renamed[:-4] + ['num_sent', 'num_words', 'word_freq', 'file_name.txt']
 
     # Ensure parent directories exist
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -417,17 +419,18 @@ def save_tags_combined(
                     language_name = language_code
 
                 # Build row values
-                row_values = [str(features[label]) for label in labels_original[:-3]]
+                row_values = [str(features[label]) for label in labels_original[:-4]]
 
                 # Get trailing statistics
                 num_sent = str(features['num_sent'])
+                num_words = str(features['num_words'])
                 word_freq = str(features['word_freq'])
                 file_name = str(features['file_name'])
 
                 row = [
                           site, language_name, patient_id, transcript_type,
                           day, session, '', speaker_role_output
-                      ] + row_values + [num_sent, word_freq, file_name]
+                      ] + row_values + [num_sent, num_words, word_freq, file_name]
 
                 outfile.write('\t'.join(row) + '\n')
 
@@ -638,7 +641,7 @@ def main() -> None:
 
                 freq_statistics = {
                     'num_sent': num_sentences,
-                    # 'num_words': num_words,  # Not included in expected output
+                    'num_words': num_words,
                     'word_freq': mean_word_freq,
                     'file_name': str(transcript.filename)
                 }
