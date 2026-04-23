@@ -1,15 +1,19 @@
 """
 Patch num_words into existing NDA submission CSVs.
 
-Reads a CSV with a transcript_file column, finds the matching transcript files
-in a given directory, runs Stanza tokenization to count words per speaker role,
-and inserts a num_words column between num_sent and word_freq.
+Reads all CSV part files in an input directory, finds the matching transcript
+files in a transcripts directory (by basename from the transcript_file column),
+and inserts a num_words column between num_sent and word_freq in each CSV.
+
+Strict validation: if any transcript file referenced across ALL input CSVs
+cannot be matched on disk, the script exits immediately without processing
+anything.
 
 Usage:
     python misc/patch_num_words.py \
-        --input-csv nda4_redo/journals/part-00000-....csv \
+        --input-dir  nda4_redo/journals/ \
         --transcripts /path/to/transcripts \
-        --o nda4_redo/journals/part-00000-..._patched.csv \
+        --output-dir nda4_redo/journals_patched/ \
         --gpu 0
 """
 
@@ -18,6 +22,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import csv
+import sys
 import argparse
 import stanza
 from pathlib import Path
@@ -27,6 +32,8 @@ from utils.transcripts import Transcript
 from features.grammar import detect_language_for_transcript, LANG_TO_STANZA
 from data.langs import Language
 
+
+REQUIRED_COLS = {'transcript_file', 'speaker_role', 'num_sent', 'word_freq', 'chrspeech_other_lang'}
 
 LANG_VALUE_TO_ENUM: dict[str, Language] = {
     lang.value.lower(): lang
@@ -60,85 +67,92 @@ def count_words_by_role(transcript: Transcript, nlp) -> dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patch num_words column into an existing NDA submission CSV.",
+        description="Patch num_words column into a directory of NDA submission CSVs.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--input-csv", type=str, required=True,
-                        help="Input CSV file to patch")
+    parser.add_argument("--input-dir", type=str, required=True,
+                        help="Directory containing CSV part files to patch")
     parser.add_argument("--transcripts", type=str, required=True,
                         help="Root directory to search for transcript .txt files")
-    parser.add_argument("--o", type=str, required=True,
-                        help="Output CSV file path")
+    parser.add_argument("--output-dir", type=str, required=True,
+                        help="Directory to write patched CSVs (same filenames as input)")
     parser.add_argument("--gpu", type=int, required=True,
                         help="GPU device ID to use")
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
-    input_csv_path = Path(args.input_csv)
+    input_dir = Path(args.input_dir)
     transcripts_dir = Path(args.transcripts)
-    output_path = Path(args.o)
+    output_dir = Path(args.output_dir)
 
-    # Read input CSV
-    with open(input_csv_path, 'r', encoding='utf-8', newline='') as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None:
-            print("Error: CSV file is empty or has no header.")
-            return
+    # ------------------------------------------------------------------ #
+    # Phase 1: Read and validate — no Stanza, no output until this passes #
+    # ------------------------------------------------------------------ #
 
-        required_cols = {'transcript_file', 'speaker_role', 'num_sent', 'word_freq', 'chrspeech_other_lang'}
-        missing = required_cols - set(reader.fieldnames)
-        if missing:
-            print(f"Error: Missing required columns: {missing}")
-            return
+    csv_files = sorted(input_dir.glob("*.csv"))
+    if not csv_files:
+        print(f"Error: no CSV files found in {input_dir}")
+        sys.exit(1)
 
-        rows = list(reader)
-        original_fieldnames = list(reader.fieldnames)
+    print(f"Found {len(csv_files)} CSV file(s) in {input_dir}")
 
-    print(f"Loaded {len(rows)} rows from {input_csv_path.name}")
+    # Read all CSVs and validate columns
+    # csv_data: {csv_path: (fieldnames, rows)}
+    csv_data: dict[Path, tuple[list[str], list[dict]]] = {}
 
-    # Build output fieldnames: insert num_words after num_sent
-    if 'num_words' in original_fieldnames:
-        print("'num_words' column already present — values will be overwritten.")
-        fieldnames = original_fieldnames
-    else:
-        idx = original_fieldnames.index('num_sent')
-        fieldnames = original_fieldnames[:idx + 1] + ['num_words'] + original_fieldnames[idx + 1:]
+    for csv_path in csv_files:
+        with open(csv_path, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None:
+                print(f"Error: {csv_path.name} is empty or has no header.")
+                sys.exit(1)
+            missing_cols = REQUIRED_COLS - set(reader.fieldnames)
+            if missing_cols:
+                print(f"Error: {csv_path.name} is missing required columns: {missing_cols}")
+                sys.exit(1)
+            rows = list(reader)
+            csv_data[csv_path] = (list(reader.fieldnames), rows)
 
-    # Map each unique filename to its Language enum via chrspeech_other_lang
+    print("All CSV files passed column validation.")
+
+    # Collect all unique transcript basenames and their language across all CSVs
     filename_to_lang: dict[str, Language] = {}
-    for row in rows:
-        fname = Path(row['transcript_file']).name
-        if fname not in filename_to_lang:
-            filename_to_lang[fname] = map_language_string(row['chrspeech_other_lang'])
+    for _, (_, rows) in csv_data.items():
+        for row in rows:
+            fname = Path(row['transcript_file']).name
+            if fname not in filename_to_lang:
+                filename_to_lang[fname] = map_language_string(row['chrspeech_other_lang'])
 
-    print(f"Found {len(filename_to_lang)} unique transcript filenames in CSV.")
+    print(f"Found {len(filename_to_lang)} unique transcript filenames across all CSVs.")
 
-    # Find transcript files on disk
-    print(f"\nSearching for transcripts in {transcripts_dir} ...")
+    # Build disk index
+    print(f"\nIndexing transcript files in {transcripts_dir} ...")
     disk_files: dict[str, Path] = {p.name: p for p in transcripts_dir.rglob('*.txt')}
+    print(f"Indexed {len(disk_files)} .txt files on disk.")
 
-    found: dict[str, Path] = {
-        fname: disk_files[fname]
-        for fname in filename_to_lang
-        if fname in disk_files
-    }
-    not_found = [fname for fname in filename_to_lang if fname not in disk_files]
+    # Strict match check — abort if any file is missing
+    missing = [fname for fname in filename_to_lang if fname not in disk_files]
+    if missing:
+        print(f"\nError: {len(missing)} transcript file(s) not found in {transcripts_dir}:")
+        for fname in sorted(missing):
+            print(f"  {fname}")
+        print("\nAborting — no output written.")
+        sys.exit(1)
 
-    print(f"Matched {len(found)} / {len(filename_to_lang)} files on disk.")
-    for fname in not_found:
-        print(f"  WARNING: not found on disk: {fname}")
+    print("All transcript files matched on disk. Proceeding with processing.")
 
-    if not found:
-        print("No transcript files found. Exiting.")
-        return
+    # ------------------------------------------------------------------ #
+    # Phase 2: Count words                                                #
+    # ------------------------------------------------------------------ #
 
-    # Group matched files by Stanza language code
+    # Group by Stanza language code
     transcripts_by_stanza: dict[str, list[tuple[str, Path]]] = defaultdict(list)
     cn_files: list[tuple[str, Path]] = []
 
-    for fname, fpath in found.items():
+    for fname in filename_to_lang:
         lang = filename_to_lang[fname]
+        fpath = disk_files[fname]
         if lang == Language.cn:
             cn_files.append((fname, fpath))
         elif lang in LANG_TO_STANZA:
@@ -146,9 +160,9 @@ def main() -> None:
         else:
             print(f"  WARNING: unsupported/unknown language '{lang}' for {fname}, skipping.")
 
-    # Handle Chinese transcripts that need language detection
+    # Language detection for Chinese transcripts
     if cn_files:
-        print(f"\nDetecting script variant for {len(cn_files)} Chinese transcripts...")
+        print(f"\nDetecting script variant for {len(cn_files)} Chinese transcript(s)...")
         Transcript.set_directory_path(transcripts_dir)
         langid_pipeline = stanza.Pipeline(lang='multilingual', processors='langid', use_gpu=True)
         for fname, fpath in cn_files:
@@ -158,15 +172,14 @@ def main() -> None:
             transcripts_by_stanza[detected].append((fname, fpath))
         del langid_pipeline
 
-    # Count words per transcript per speaker role
-    results: dict[tuple[str, str], int] = {}  # (filename, speaker_role_label) -> num_words
+    results: dict[tuple[str, str], int] = {}  # (basename, speaker_role_label) -> num_words
 
     Transcript.set_directory_path(transcripts_dir)
 
     for stanza_code in sorted(transcripts_by_stanza.keys()):
         file_pairs = transcripts_by_stanza[stanza_code]
         print(f"\n{'=' * 55}")
-        print(f"Language: {stanza_code}  ({len(file_pairs)} transcripts)")
+        print(f"Language: {stanza_code}  ({len(file_pairs)} transcript(s))")
         print(f"{'=' * 55}")
 
         nlp = stanza.Pipeline(stanza_code, processors='tokenize,mwt', use_gpu=True)
@@ -186,27 +199,45 @@ def main() -> None:
 
         del nlp
 
-    # Patch rows in place
-    rows_updated = 0
-    for row in rows:
-        fname = Path(row['transcript_file']).name
-        role = row['speaker_role']
-        count = results.get((fname, role))
-        if count is not None:
-            row['num_words'] = str(count)
-            rows_updated += 1
+    # ------------------------------------------------------------------ #
+    # Phase 3: Write output CSVs                                          #
+    # ------------------------------------------------------------------ #
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    total_rows = 0
+    total_updated = 0
+
+    for csv_path, (original_fieldnames, rows) in csv_data.items():
+        if 'num_words' in original_fieldnames:
+            fieldnames = original_fieldnames
         else:
-            row.setdefault('num_words', '')
+            idx = original_fieldnames.index('num_sent')
+            fieldnames = original_fieldnames[:idx + 1] + ['num_words'] + original_fieldnames[idx + 1:]
 
-    # Write output CSV
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-        writer.writeheader()
-        writer.writerows(rows)
+        rows_updated = 0
+        for row in rows:
+            fname = Path(row['transcript_file']).name
+            role = row['speaker_role']
+            count = results.get((fname, role))
+            if count is not None:
+                row['num_words'] = str(count)
+                rows_updated += 1
+            else:
+                row.setdefault('num_words', '')
 
-    print(f"\nDone. {rows_updated} / {len(rows)} rows updated with num_words.")
-    print(f"Output saved to {output_path}")
+        out_path = output_dir / csv_path.name
+        with open(out_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(rows)
+
+        print(f"  {csv_path.name}: {rows_updated}/{len(rows)} rows updated -> {out_path}")
+        total_rows += len(rows)
+        total_updated += rows_updated
+
+    print(f"\nDone. {total_updated}/{total_rows} total rows updated with num_words.")
+    print(f"Output written to {output_dir}")
 
 
 if __name__ == "__main__":
