@@ -33,7 +33,7 @@ from collections import defaultdict
 
 from utils.transcripts import Transcript
 from features.grammar import detect_language_for_transcript, LANG_TO_STANZA
-from data.langs import Language
+from data.langs import Language, SITE_CODE_TO_LANGUAGES
 
 
 REQUIRED_COLS = {'transcript_file', 'speaker_role', 'num_sent', 'word_freq', 'chrspeech_other_lang'}
@@ -45,6 +45,7 @@ def normalize_fname(fname: str) -> str:
     """Strip leading zeros from submission/session numbers in a filename."""
     return _SUBMISSION_RE.sub(lambda m: m.group(1) + str(int(m.group(2))), fname)
 
+
 LANG_VALUE_TO_ENUM: dict[str, Language] = {
     lang.value.lower(): lang
     for lang in Language
@@ -52,8 +53,43 @@ LANG_VALUE_TO_ENUM: dict[str, Language] = {
 }
 
 
-def map_language_string(lang_str: str) -> Language:
-    return LANG_VALUE_TO_ENUM.get(lang_str.strip().lower(), Language.UNKNOWN)
+def _site_code_from_fname(fname: str) -> str | None:
+    """Extract the 2-letter site code from a transcript filename."""
+    prefix = fname.split('_')[0]  # e.g. 'PrescientHK' or 'PronetSH'
+    for site in SITE_CODE_TO_LANGUAGES:
+        if site in prefix:
+            return site
+    return None
+
+
+def resolve_language(lang_str: str, fname: str) -> Language:
+    """
+    Map chrspeech_other_lang to a Language enum.
+    Falls back to site-code lookup when the string is unrecognised.
+    Sites that include Language.cn in their possible languages (e.g. HK, SH)
+    always return Language.cn so they go through Stanza's langid detection.
+    """
+    lang = LANG_VALUE_TO_ENUM.get(lang_str.strip().lower(), Language.UNKNOWN)
+    if lang != Language.UNKNOWN:
+        return lang
+
+    site = _site_code_from_fname(fname)
+    if site and site in SITE_CODE_TO_LANGUAGES:
+        possible = SITE_CODE_TO_LANGUAGES[site]
+        if Language.cn in possible:
+            return Language.cn
+        return possible[0]
+
+    return Language.UNKNOWN
+
+
+def make_stanza_pipeline(stanza_code: str, use_gpu: bool):
+    """Init a tokenize+mwt pipeline, falling back to tokenize-only if mwt is unavailable."""
+    try:
+        return stanza.Pipeline(stanza_code, processors='tokenize,mwt', use_gpu=use_gpu)
+    except Exception:
+        print(f"  NOTE: mwt not available for '{stanza_code}', using tokenize only.")
+        return stanza.Pipeline(stanza_code, processors='tokenize', use_gpu=use_gpu)
 
 
 def count_words_by_role(transcript: Transcript, nlp) -> dict[str, int]:
@@ -132,7 +168,7 @@ def main() -> None:
         for row in rows:
             fname = Path(row['transcript_file']).name
             if fname not in filename_to_lang:
-                filename_to_lang[fname] = map_language_string(row['chrspeech_other_lang'])
+                filename_to_lang[fname] = resolve_language(row['chrspeech_other_lang'], fname)
 
     print(f"Found {len(filename_to_lang)} unique transcript filenames across all CSVs.")
 
@@ -211,7 +247,7 @@ def main() -> None:
         print(f"Language: {stanza_code}  ({len(file_pairs)} transcript(s))")
         print(f"{'=' * 55}")
 
-        nlp = stanza.Pipeline(stanza_code, processors='tokenize,mwt', use_gpu=True)
+        nlp = make_stanza_pipeline(stanza_code, use_gpu=True)
 
         for i, (fname, fpath) in enumerate(file_pairs):
             print(f"[{i + 1}/{len(file_pairs)}] {fname}")
