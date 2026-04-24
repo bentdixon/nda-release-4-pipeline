@@ -25,6 +25,7 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.par
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import csv
+import re
 import argparse
 import stanza
 from pathlib import Path
@@ -36,6 +37,13 @@ from data.langs import Language
 
 
 REQUIRED_COLS = {'transcript_file', 'speaker_role', 'num_sent', 'word_freq', 'chrspeech_other_lang'}
+
+_SUBMISSION_RE = re.compile(r'(submission|session)(\d+)', re.IGNORECASE)
+
+
+def normalize_fname(fname: str) -> str:
+    """Strip leading zeros from submission/session numbers in a filename."""
+    return _SUBMISSION_RE.sub(lambda m: m.group(1) + str(int(m.group(2))), fname)
 
 LANG_VALUE_TO_ENUM: dict[str, Language] = {
     lang.value.lower(): lang
@@ -118,7 +126,7 @@ def main() -> None:
 
     print("All CSV files passed column validation.")
 
-    # Collect all unique transcript basenames and their language across all CSVs
+    # Collect all unique transcript basenames (exact) and their language across all CSVs
     filename_to_lang: dict[str, Language] = {}
     for _, (_, rows) in csv_data.items():
         for row in rows:
@@ -128,16 +136,33 @@ def main() -> None:
 
     print(f"Found {len(filename_to_lang)} unique transcript filenames across all CSVs.")
 
-    # Build disk index
+    # Build disk indices: exact and normalized (for fallback)
     print(f"\nIndexing transcript files in {transcripts_dir} ...")
-    disk_files: dict[str, Path] = {p.name: p for p in transcripts_dir.rglob('*.txt')}
-    print(f"Indexed {len(disk_files)} .txt files on disk.")
+    disk_files_exact: dict[str, Path] = {}
+    disk_files_normalized: dict[str, Path] = {}
+    for p in transcripts_dir.rglob('*.txt'):
+        disk_files_exact[p.name] = p
+        disk_files_normalized[normalize_fname(p.name)] = p
+    print(f"Indexed {len(disk_files_exact)} .txt files on disk.")
 
-    # Strict match check — abort if any file is missing
-    missing = [fname for fname in filename_to_lang if fname not in disk_files]
-    if missing:
-        print(f"\nError: {len(missing)} transcript file(s) not found in {transcripts_dir}:")
-        for fname in sorted(missing):
+    # Two-pass resolution: exact match first, normalized fallback second
+    resolved: dict[str, Path] = {}  # csv_basename -> disk path
+    truly_missing: list[str] = []
+
+    for csv_fname in filename_to_lang:
+        if csv_fname in disk_files_exact:
+            resolved[csv_fname] = disk_files_exact[csv_fname]
+        else:
+            normalized = normalize_fname(csv_fname)
+            if normalized in disk_files_normalized:
+                resolved[csv_fname] = disk_files_normalized[normalized]
+                print(f"  Matched via normalization: {csv_fname}")
+            else:
+                truly_missing.append(csv_fname)
+
+    if truly_missing:
+        print(f"\nError: {len(truly_missing)} transcript file(s) not found in {transcripts_dir}:")
+        for fname in sorted(truly_missing):
             print(f"  {fname}")
         print("\nAborting — no output written.")
         sys.exit(1)
@@ -154,7 +179,7 @@ def main() -> None:
 
     for fname in filename_to_lang:
         lang = filename_to_lang[fname]
-        fpath = disk_files[fname]
+        fpath = resolved[fname]
         if lang == Language.cn:
             cn_files.append((fname, fpath))
         elif lang in LANG_TO_STANZA:
