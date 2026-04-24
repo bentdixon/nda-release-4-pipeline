@@ -93,19 +93,23 @@ def make_stanza_pipeline(stanza_code: str, use_gpu: bool):
 
 
 def count_words_by_role(transcript: Transcript, nlp) -> dict[str, int]:
-    is_diary = any("diary" in p.lower() for p in transcript.filename.parts)
-    roles = [('participant', transcript.participant_lines, 'Participant')]
-    if not is_diary:
-        roles.append(('interviewer', transcript.interviewer_lines, 'Interviewer'))
-
+    is_diary = any(
+        "diary" in p.lower() or "journal" in p.lower()
+        for p in transcript.filename.parts
+    )
+    roles: list[tuple] = (
+        [(transcript.lines, 'Participant')]
+        if is_diary else
+        [(transcript.participant_lines, 'Participant'),
+         (transcript.interviewer_lines, 'Interviewer')]
+    )
     results = {}
-    for _, lines, label in roles:
-        n = 0
-        for line in lines:
-            if not line.text.strip():
-                continue
-            for sent in nlp(line.text).sentences:
-                n += len(sent.words)
+    for lines, label in roles:
+        n = sum(
+            len(sent.words)
+            for line in lines if line.text.strip()
+            for sent in nlp(line.text).sentences
+        )
         if n > 0:
             results[label] = n
     return results
