@@ -18,11 +18,13 @@ Usage:
 """
 
 import os
+import sys
+
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent))
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 import csv
-import sys
 import argparse
 import stanza
 from pathlib import Path
@@ -90,7 +92,7 @@ def main() -> None:
     # Phase 1: Read and validate — no Stanza, no output until this passes #
     # ------------------------------------------------------------------ #
 
-    csv_files = sorted(input_dir.glob("*.csv"))
+    csv_files = sorted(input_dir.rglob("*.csv"))
     if not csv_files:
         print(f"Error: no CSV files found in {input_dir}")
         sys.exit(1)
@@ -203,8 +205,6 @@ def main() -> None:
     # Phase 3: Write output CSVs                                          #
     # ------------------------------------------------------------------ #
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     total_rows = 0
     total_updated = 0
 
@@ -226,7 +226,8 @@ def main() -> None:
             else:
                 row.setdefault('num_words', '')
 
-        out_path = output_dir / csv_path.name
+        out_path = output_dir / csv_path.relative_to(input_dir)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, 'w', encoding='utf-8', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
