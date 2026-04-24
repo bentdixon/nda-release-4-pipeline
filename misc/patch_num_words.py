@@ -82,8 +82,8 @@ def main() -> None:
     )
     parser.add_argument("--input-dir", type=str, required=True,
                         help="Directory containing CSV part files to patch")
-    parser.add_argument("--transcripts", type=str, required=True,
-                        help="Root directory to search for transcript .txt files")
+    parser.add_argument("--transcripts", type=str, required=True, nargs='+',
+                        help="One or more root directories to search for transcript .txt files")
     parser.add_argument("--output-dir", type=str, required=True,
                         help="Directory to write patched CSVs (same filenames as input)")
     parser.add_argument("--gpu", type=int, required=True,
@@ -93,7 +93,7 @@ def main() -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
 
     input_dir = Path(args.input_dir)
-    transcripts_dir = Path(args.transcripts)
+    transcripts_dirs = [Path(d) for d in args.transcripts]
     output_dir = Path(args.output_dir)
 
     # ------------------------------------------------------------------ #
@@ -137,12 +137,13 @@ def main() -> None:
     print(f"Found {len(filename_to_lang)} unique transcript filenames across all CSVs.")
 
     # Build disk indices: exact and normalized (for fallback)
-    print(f"\nIndexing transcript files in {transcripts_dir} ...")
+    print(f"\nIndexing transcript files across {len(transcripts_dirs)} director(y/ies) ...")
     disk_files_exact: dict[str, Path] = {}
     disk_files_normalized: dict[str, Path] = {}
-    for p in transcripts_dir.rglob('*.txt'):
-        disk_files_exact[p.name] = p
-        disk_files_normalized[normalize_fname(p.name)] = p
+    for transcripts_dir in transcripts_dirs:
+        for p in transcripts_dir.rglob('*.txt'):
+            disk_files_exact[p.name] = p
+            disk_files_normalized[normalize_fname(p.name)] = p
     print(f"Indexed {len(disk_files_exact)} .txt files on disk.")
 
     # Two-pass resolution: exact match first, normalized fallback second
@@ -161,7 +162,8 @@ def main() -> None:
                 truly_missing.append(csv_fname)
 
     if truly_missing:
-        print(f"\nError: {len(truly_missing)} transcript file(s) not found in {transcripts_dir}:")
+        dirs_str = ', '.join(str(d) for d in transcripts_dirs)
+        print(f"\nError: {len(truly_missing)} transcript file(s) not found in [{dirs_str}]:")
         for fname in sorted(truly_missing):
             print(f"  {fname}")
         print("\nAborting — no output written.")
@@ -190,7 +192,7 @@ def main() -> None:
     # Language detection for Chinese transcripts
     if cn_files:
         print(f"\nDetecting script variant for {len(cn_files)} Chinese transcript(s)...")
-        Transcript.set_directory_path(transcripts_dir)
+        Transcript.set_directory_path(transcripts_dirs[0])
         langid_pipeline = stanza.Pipeline(lang='multilingual', processors='langid', use_gpu=True)
         for fname, fpath in cn_files:
             transcript = Transcript(fpath)
@@ -201,7 +203,7 @@ def main() -> None:
 
     results: dict[tuple[str, str], int] = {}  # (basename, speaker_role_label) -> num_words
 
-    Transcript.set_directory_path(transcripts_dir)
+    Transcript.set_directory_path(transcripts_dirs[0])
 
     for stanza_code in sorted(transcripts_by_stanza.keys()):
         file_pairs = transcripts_by_stanza[stanza_code]
